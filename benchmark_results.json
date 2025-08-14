@@ -1,0 +1,29 @@
+{
+  "test_date": "2024-07-18",
+  "test_timestamp": "2025-08-13T22:18:23.100844",
+  "original": {
+    "execution_time_ms": 2495.45,
+    "journals_created": 3,
+    "vouchers_created": 3,
+    "function_result": 0
+  },
+  "enhanced": {
+    "status": "success",
+    "journal_date": "2024-07-18",
+    "journals_created": 0,
+    "vouchers_created": 0,
+    "execution_time_ms": 7.93,
+    "performance_gain": {
+      "original_time_ms": 3023,
+      "enhanced_time_ms": 7.93,
+      "improvement_percentage": 99.74,
+      "speedup_factor": 381.27
+    }
+  },
+  "comparison": {
+    "speedup_factor": 314.68,
+    "improvement_percentage": 99.68,
+    "time_saved_ms": 2487.52,
+    "verdict": "ENHANCED_BETTER"
+  }
+}

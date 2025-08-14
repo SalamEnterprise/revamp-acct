@@ -1,0 +1,31 @@
+{
+  "test_date": "2024-07-18",
+  "timestamp": "2025-08-13T22:34:04.056478",
+  "original": {
+    "execution_time_ms": 2427.62,
+    "journals": 3,
+    "vouchers": 3,
+    "lines": 34
+  },
+  "ultra": {
+    "status": "success",
+    "journal_date": "2024-07-18",
+    "journals_created": 23,
+    "total_amount": 1058682235.2,
+    "total_transactions": 259602,
+    "execution_time_ms": 1823.33,
+    "performance_breakdown": {
+      "data_load_ms": 1688.98,
+      "duckdb_ms": 113.01,
+      "polars_ms": 21.34
+    },
+    "gl_entries_processed": 303211,
+    "technology": "DuckDB + Polars"
+  },
+  "comparison": {
+    "speedup_factor": 1.33,
+    "improvement_percentage": 24.89,
+    "time_saved_ms": 604.29,
+    "verdict": "ULTRA_FASTER"
+  }
+}
