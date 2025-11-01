@@ -3,7 +3,7 @@
 ### 1.1 Purpose
 
 This document describes the technical architecture for a mission-critical batch processing system that generates journal entries for premium and claims transactions during the month-end close window.
-1.2 Business Requirements
+### 1.2 Business Requirements
 | Requirement | Specification |
 | --- | --- |
 | Processing Volume | 10M transactions/month (current) → 50M (3 years) |
