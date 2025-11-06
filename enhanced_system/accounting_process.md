@@ -215,6 +215,135 @@ flowchart TD
     L1 & L2 -.-> G3
     R3 -.-> G3
 ```
-   
-    R3 --> G3
+### Operational Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    %% =====================================================================
+    %% SYSTEMS & ROLES
+    %% =====================================================================
+    participant SRC as Source System<br/>(Policy / Claim / Billing DB)
+    participant APP as Backend Engine<br/>(Python + Polars)
+    participant STG as Staging DB<br/>(je_header_staging / je_line_staging)
+    participant LED as Ledger DB<br/>(ledger_entry_header / ledger_entry_line)
+    participant BAL as Balances / Snapshots
+    participant MV  as Materialized Views<br/>(Trial Balance, Fund, P&L)
+    participant AUD as Audit & Control<br/>(Batch Control, Checksum, Logs)
+    participant REP as Reporting Layer<br/>(BI / IFRS-17 Reports)
+
+    %% =====================================================================
+    %% DAILY CYCLE (OCT-2025 example)
+    %% =====================================================================
+
+    %% 1. EXTRACT & LOAD
+    SRC->>APP: ① Export transactions (txn_source)<br/>e.g., Premium Receipts, Claims
+    APP->>STG: ② COPY → staging (raw load)
+    note over STG: <b>Elapsed ≈ 25 s</b><br/>UNLOGGED, high-speed import
+
+    %% 2. EXPANSION & VALIDATION
+    APP->>APP: ③ Vectorized fund allocation<br/>& journal expansion (Polars)
+    APP->>STG: ④ Write je_header_staging + je_line_staging
+    APP->>AUD: ⑤ Register batch_control(run_id,status='PENDING')
+    APP->>APP: ⑥ Validation → DR=CR, fund/account checks
+    note over APP,STG: <b>Elapsed ≈ 5 s</b><br/>Fast vectorized verification
+
+    %% 3. POSTING WINDOW
+    APP->>LED: ⑦ COPY → ledger_entry_header / line<br/>(partitioned by month)
+    LED->>BAL: ⑧ Update monthly account_balance_snapshot
+    LED->>AUD: ⑨ Mark batch_control(status='POSTED',checksum)
+    note over LED: <b>Elapsed ≈ 60 – 70 s</b><br/>8 M lines committed
+
+    %% 4. REPORTING REFRESH
+    BAL->>MV: ⑩ Refresh materialized views<br/>(trial balance, fund, P&L)
+    MV->>REP: ⑪ Expose reports via API / dashboard
+    note over MV: <b>Elapsed ≈ 5 s</b><br/>Incremental refresh
+
+    %% 5. GOVERNANCE TRAIL
+    AUD->>REP: ⑫ Audit evidence: run_id, checksum, operator, timestamp
+    REP->>AUD: ⑬ Reconciliation logs & approvals
+    note over AUD: Full lineage: txn_source → JE → Ledger → Report
+
+```
+
+### Staging live cycle 
+```mermaid
+flowchart TD
+    %% ======================================================
+    %% STAGING LIFECYCLE MANAGEMENT DIAGRAM
+    %% ======================================================
+
+    subgraph LOAD["① LOAD - Ingestion Stage"]
+        A1["Source System<br/>(txn_source)"]
+        A2["Backend Engine (Python + Polars)<br/>fund allocation + journal expansion"]
+        A3["je_header_staging / je_line_staging<br/><b>UNLOGGED</b> PostgreSQL tables"]
+        A1 -->|"COPY / bulk insert"| A2
+        A2 -->|"COPY to staging"| A3
+        noteA["
+            Row volume: 1–8M<br/>
+            Index: run_id, je_internal_id<br/>
+            Frequency: hourly / daily
+        "] 
+        A3 -.-> noteA
+    end
+
+    subgraph VALIDATE["② VALIDATION - QA & Integrity"]
+        V1["DR=CR check per JE"]
+        V2["Account + fund existence check"]
+        V3["Run metadata validation (batch_control)"]
+        A3 --> V1 --> V2 --> V3
+        noteV["
+            Vectorized Polars validation<br/>
+            <b>Time: ~3–5 sec</b><br/>
+            Status updated: PENDING → VALIDATED
+        "]
+        V3 -.-> noteV
+    end
+
+    subgraph POST["③ POSTING - Move to Ledger"]
+        P1["COPY → ledger_entry_header / line<br/>partitioned by month"]
+        P2["Update account_balance_snapshot<br/>and trial balance"]
+        V3 -->|"Validated run_id only"| P1 --> P2
+        noteP["
+            <b>Time: ~60–70 sec</b><br/>
+            8M lines posted<br/>
+            Immutability enforced
+        "]
+        P2 -.-> noteP
+    end
+
+    subgraph ARCHIVE["④ ARCHIVE - Retain evidence"]
+        R1["Insert failed runs into<br/>je_line_staging_archive"]
+        R2["Insert headers into<br/>je_header_staging_archive"]
+        P2 --> R1
+        P2 --> R2
+        noteR["
+            Keeps audit trail<br/>
+            <b>Retention: 30–90 days</b><br/>
+            Optional compression (ZSTD)
+        "]
+        R2 -.-> noteR
+    end
+
+    subgraph PURGE["⑤ PURGE - Cleanup"]
+        X1["DELETE or TRUNCATE<br/>old staging partitions"]
+        X2["VACUUM / ANALYZE"]
+        R2 --> X1 --> X2
+        noteX["
+            <b>Frequency:</b> weekly or monthly<br/>
+            <b>Goal:</b> keep staging small & fast
+        "]
+        X2 -.-> noteX
+    end
+
+    %% DATAFLOW CONNECTIONS
+    LOAD --> VALIDATE
+    VALIDATE --> POST
+    POST --> ARCHIVE
+    ARCHIVE --> PURGE
+
+    %% Styling (optional for better visuals in GitHub)
+    classDef stage fill:#f0f7ff,stroke:#0366d6,stroke-width:2px,color:#000;
+    class LOAD,VALIDATE,POST,ARCHIVE,PURGE stage
+    classDef note fill:#fff3cd,stroke:#856404,stroke-dasharray: 5 5,color:#856404,font-size:12px;
+    class noteA,noteV,noteP,noteR,noteX note
 ```
