@@ -347,3 +347,115 @@ flowchart TD
     classDef note fill:#fff3cd,stroke:#856404,stroke-dasharray: 5 5,color:#856404,font-size:12px;
     class noteA,noteV,noteP,noteR,noteX note
 ```
+
+## SQL-based automatic partition rotation
+```sql
+-- parent
+CREATE TABLE IF NOT EXISTS public.je_line_staging_parent
+    (LIKE public.je_line_staging INCLUDING ALL)
+    PARTITION BY RANGE (created_at);
+
+-- procedure to rotate partitions
+CREATE OR REPLACE PROCEDURE public.rotate_staging_partitions()
+LANGUAGE plpgsql AS $$
+DECLARE
+    start_date DATE := date_trunc('month', current_date);
+    next_date  DATE := start_date + interval '1 month';
+    tbl_name   TEXT;
+BEGIN
+    tbl_name := format('je_line_staging_%s', to_char(start_date,'YYYYMM'));
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relname = tbl_name
+    ) THEN
+        EXECUTE format(
+          'CREATE UNLOGGED TABLE public.%I PARTITION OF public.je_line_staging_parent
+           FOR VALUES FROM (%L) TO (%L)',
+           tbl_name, start_date, next_date);
+        RAISE NOTICE 'Created new staging partition: %', tbl_name;
+    END IF;
+END;
+$$;
+
+-- schedule monthly
+CALL public.rotate_staging_partitions();
+
+-- parent
+CREATE TABLE IF NOT EXISTS public.je_line_staging_parent
+    (LIKE public.je_line_staging INCLUDING ALL)
+    PARTITION BY RANGE (created_at);
+
+-- procedure to rotate partitions
+CREATE OR REPLACE PROCEDURE public.rotate_staging_partitions()
+LANGUAGE plpgsql AS $$
+DECLARE
+    start_date DATE := date_trunc('month', current_date);
+    next_date  DATE := start_date + interval '1 month';
+    tbl_name   TEXT;
+BEGIN
+    tbl_name := format('je_line_staging_%s', to_char(start_date,'YYYYMM'));
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relname = tbl_name
+    ) THEN
+        EXECUTE format(
+          'CREATE UNLOGGED TABLE public.%I PARTITION OF public.je_line_staging_parent
+           FOR VALUES FROM (%L) TO (%L)',
+           tbl_name, start_date, next_date);
+        RAISE NOTICE 'Created new staging partition: %', tbl_name;
+    END IF;
+END;
+$$;
+
+-- schedule monthly
+CALL public.rotate_staging_partitions();
+
+CREATE OR REPLACE PROCEDURE public.purge_old_staging_partitions(retention_days INT DEFAULT 30)
+LANGUAGE plpgsql AS $$
+DECLARE
+    cutoff DATE := current_date - retention_days;
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT inhrelid::regclass AS part_table
+        FROM pg_inherits
+        WHERE inhparent = 'public.je_line_staging_parent'::regclass
+    LOOP
+        IF (r.part_table::text ~ 'je_line_staging_[0-9]{6}') THEN
+            IF to_date(substring(r.part_table::text, '([0-9]{6})$'), 'YYYYMM') < date_trunc('month', cutoff)
+            THEN
+                EXECUTE format('DROP TABLE IF EXISTS %I CASCADE;', r.part_table);
+                RAISE NOTICE 'Dropped old staging partition: %', r.part_table;
+            END IF;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+-- run weekly
+CALL public.purge_old_staging_partitions(30);
+
+CREATE TABLE IF NOT EXISTS public.je_line_staging_archive
+(LIKE public.je_line_staging INCLUDING ALL);
+
+CREATE OR REPLACE PROCEDURE public.archive_failed_runs()
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO public.je_line_staging_archive
+    SELECT * FROM public.je_line_staging_parent s
+     WHERE s.run_id IN (
+        SELECT run_id FROM batch_control WHERE status IN ('FAILED','REVIEW')
+     );
+    RAISE NOTICE 'Archived failed runs to je_line_staging_archive';
+END;
+$$;
+
+-- execute daily after validation
+CALL public.archive_failed_runs();
+
+
+```
+```bash
+0 0 * * * psql -d salam_accounting -c "CALL rotate_staging_partitions();"
+30 0 * * 0 psql -d salam_accounting -c "CALL purge_old_staging_partitions(30);"
+0 1 * * * psql -d salam_accounting -c "CALL post_batch(current_run_id());"
+
+```
