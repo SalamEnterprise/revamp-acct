@@ -7,6 +7,242 @@
 | **Ledger Core**          | `ledger_entry_header`, `ledger_entry_line` | Posted journals (immutable)                  | From staging after verification |
 | **Ledger Balances**      | `account_balance_snapshot`                 | Aggregated balances per account/fund/period  | Derived from posted lines       |
 
+---
+### Data Flow (General)
+```mermaid
+flowchart LR
+    A["1️⃣ txn_source<br/>(gross_amount and components)"] --> B["2️⃣ Template Routing<br/>(match product/channel/txn_type)"]
+    B --> C["3️⃣ Expand Journal Lines<br/>evaluate amount_expr"]
+    C --> D["4️⃣ Validate DR=CR (template_control)"]
+    D --> E["5️⃣ Stage JE Header & Line<br/>(UNLOGGED staging tables)"]
+    E --> F["6️⃣ Post to Ledger<br/>partitioned by month"]
+    F --> G["7️⃣ Update Balances & MVs<br/>Trial Balance, Fund Statement"]
+
+```
+---
+### Sequence Diagram
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TXN as txn_source
+    participant TMP as journal_template*
+    participant APP as Backend Engine (Python + Polars)
+    participant STG as je_*_staging
+    participant LED as ledger_entry_*
+    participant REP as Reporting Views
+
+    TXN->>APP: ① Load new txn_source (premium/claim)
+    APP->>TMP: ② Lookup template + match by product/channel/date
+    TMP-->>APP: ③ Return active lines and conditions
+    APP->>APP: ④ Compute amount_expr (Polars)
+    APP->>APP: ⑤ Validate DR=CR within tolerance
+    APP->>STG: ⑥ COPY headers + lines
+    STG->>LED: ⑦ Post to ledger partitions
+    LED->>REP: ⑧ Update balances and materialized views
+
+```
+---
+### Operational Lifecyce
+```mermaid
+flowchart TD
+    LOAD["① Load txn_source"]
+    MATCH["② Match template + expand journals"]
+    VALID["③ Validate integrity (DR=CR)"]
+    STAGE["④ Stage to je_header_staging / je_line_staging"]
+    POST["⑤ Post to ledger partitions"]
+    SNAP["⑥ Update account_balance_snapshot"]
+    ARCH["⑦ Archive failed/QA runs"]
+    PURGE["⑧ Purge old partitions"]
+    LOAD --> MATCH --> VALID --> STAGE --> POST --> SNAP --> ARCH --> PURGE
+
+```
+---
+### ER Model
+```mermaid
+flowchart TD
+    %% Core entities
+    subgraph SOURCE["txn_source"]
+        S[source_rowid<br/>txn_type<br/>product_code<br/>channel<br/>gross_amount<br/>components]
+    end
+
+    subgraph TEMPLATE["Journal Template Catalog"]
+        T["template_code + version<br/>txn_type, status, effective/expiry"]
+        TM["match_id<br/>product_code / channel (nullable)<br/>priority, condition_expr"]
+        TL["line_no<br/>side, account_code, fund_code, amount_expr"]
+    end
+
+    subgraph STAGING["Staging Tables"]
+        H[je_header_staging<br/>run_id, template_code/version, je_date]
+        L[je_line_staging<br/>run_id, account_code, fund, side, amount]
+    end
+
+    subgraph LEDGER["Ledger"]
+        LH[ledger_entry_header<br/>je_number, date, type, run_id]
+        LL[ledger_entry_line<br/>account_code, fund, side, amount]
+        BAL[account_balance_snapshot<br/>period_start, acct, fund, debit/credit/balance]
+    end
+
+    S --> H
+    T --> TM
+    T --> TL
+    H --> L
+    H --> LH
+    L --> LL
+    LH --> LL
+    LL --> BAL
+
+```
+---
+```mermaid
+erDiagram
+    %% ==========================
+    %% SOURCE
+    %% ==========================
+    txn_source {
+        varchar source_rowid PK
+        varchar txn_type
+        varchar policy_no
+        varchar product_code
+        varchar channel
+        date bank_value_date
+        numeric gross_amount
+        numeric tabarru_amount
+        numeric tanahud_amount
+        numeric invest_amount
+        numeric ujroh_amount
+        numeric admin_amount
+    }
+
+    %% ==========================
+    %% JOURNAL TEMPLATES
+    %% ==========================
+    journal_template {
+        varchar template_code PK
+        varchar template_version PK
+        varchar title
+        varchar txn_type
+        varchar description_pattern
+        varchar je_type
+        date effective_date
+        date expiry_date
+        varchar status
+        varchar created_by
+        timestamp created_at
+        varchar approved_by
+        timestamp approved_at
+    }
+
+    journal_template_match {
+        bigint match_id PK
+        varchar template_code FK
+        varchar template_version FK
+        varchar product_code "nullable (wildcard)"
+        varchar channel "nullable (wildcard)"
+        numeric min_amount
+        numeric max_amount
+        text condition_expr
+        int priority
+    }
+
+    journal_template_line {
+        varchar template_code FK
+        varchar template_version FK
+        int line_no PK
+        char side
+        varchar account_code
+        varchar fund_code
+        text amount_expr
+        int amount_round
+        boolean is_active
+    }
+
+    journal_template_line_cond {
+        varchar template_code FK
+        varchar template_version FK
+        int line_no FK
+        varchar cond_name
+        text cond_expr
+    }
+
+    journal_template_control {
+        varchar template_code FK
+        varchar template_version FK
+        boolean require_balanced
+        numeric tolerance_amount
+        varchar balancing_mode
+        varchar balancing_account
+        varchar balancing_fund
+    }
+
+    %% ==========================
+    %% STAGING AND LEDGER
+    %% ==========================
+    je_header_staging {
+        bigint je_internal_id PK
+        uuid run_id
+        varchar template_code
+        varchar template_version
+        date je_date
+        varchar description
+    }
+
+    je_line_staging {
+        bigint id PK
+        uuid run_id
+        bigint je_internal_id FK
+        varchar account_code
+        varchar fund
+        char side
+        numeric amount
+    }
+
+    ledger_entry_header {
+        bigint je_id PK
+        varchar je_number
+        date je_date
+        varchar je_type
+        varchar source_rowid
+        varchar template_code
+        varchar template_version
+        uuid run_id
+    }
+
+    ledger_entry_line {
+        bigint id PK
+        bigint je_id FK
+        int line_no
+        varchar account_code
+        varchar fund
+        char side
+        numeric amount
+    }
+
+    account_balance_snapshot {
+        date period_start PK
+        varchar account_code PK
+        varchar fund PK
+        numeric opening_balance
+        numeric debit
+        numeric credit
+        numeric closing_balance
+    }
+
+    %% ==========================
+    %% RELATIONSHIPS
+    %% ==========================
+    txn_source ||--o{ je_header_staging : produces
+    journal_template ||--o{ journal_template_match : "routing rules"
+    journal_template ||--o{ journal_template_line : "posting lines"
+    journal_template_line ||--o{ journal_template_line_cond : "conditional lines"
+    journal_template ||--|| journal_template_control : "balance control"
+    je_header_staging ||--o{ je_line_staging : "1..n lines"
+    je_header_staging ||--o{ ledger_entry_header : "posted to"
+    je_line_staging ||--o{ ledger_entry_line : "posted to"
+    ledger_entry_header ||--o{ ledger_entry_line : "1..n"
+    ledger_entry_line ||--|| account_balance_snapshot : "rolls up into"
+
+```
+
 ## 🧱 2️⃣ Posting Process: Staging → Ledger
 ### Step 1: Validation
 * Ensure double-entry rule: total DR = total CR per je_internal_id.
@@ -87,6 +323,46 @@ JE_HEADER + JE_LINE (aggregated by product_code)
 
 ```
 
+```mermaid
+flowchart LR
+    %% SOURCE
+    subgraph SOURCE["Source Transactions"]
+        A["txn_source<br/>gross_amount = tabarru + tanahud + invest + ujroh + admin"]
+    end
+
+    %% BACKEND
+    subgraph BACKEND["Backend Engine (Python + Polars)"]
+        B1["1️⃣ Load txn_source from PostgreSQL"]
+        B2["2️⃣ Match Journal Template<br/>(txn_type, product, channel, date, priority)"]
+        B3["3️⃣ Expand Journal Lines<br/>Evaluate amount_expr using Polars"]
+        B4["4️⃣ Validate Balance<br/>(require_balanced, tolerance)"]
+    end
+
+    %% STAGING
+    subgraph STAGING["Database Staging (UNLOGGED)"]
+        S1["je_header_staging"]
+        S2["je_line_staging"]
+    end
+
+    %% LEDGER
+    subgraph LEDGER["Official Ledger (Partitioned by Month)"]
+        L1["ledger_entry_header"]
+        L2["ledger_entry_line"]
+        L3["account_balance_snapshot"]
+    end
+
+    %% REPORTING
+    subgraph REPORT["Reporting & Analytics"]
+        R1["Materialized Views<br/>Trial Balance / Fund / IFRS-17"]
+    end
+
+    %% FLOW
+    A --> B1 --> B2 --> B3 --> B4 --> S1 & S2
+    S1 & S2 --> LEDGER
+    LEDGER --> R1
+
+```
+
 ### 🧠 Audit Flow Example
 #### Operational control
 1. Trace a specific premium receipt:
@@ -134,7 +410,27 @@ GROUP BY fund_code;
 
 ### Complete logical structure and audit trail relationships between txn_source, je_header, and je_line
 
-![ER Diagram](er_diagram.png)
+### Operational Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TXN as Source<br/>(txn_source)
+    participant APP as Backend Engine<br/>(Python + Polars)
+    participant TMP as Template Catalog<br/>(journal_template*)
+    participant STG as Staging Tables
+    participant LED as Ledger Tables
+    participant REP as Reporting Views
+
+    TXN->>APP: ① Load new transactions<br/>(txn_type, gross_amount, components)
+    APP->>TMP: ② Query journal_template + match<br/>by txn_type, product, channel
+    TMP-->>APP: ③ Return applicable template lines + conditions
+    APP->>APP: ④ Evaluate amount_expr<br/>(Polars vectorized)
+    APP->>APP: ⑤ Validate DR=CR within tolerance
+    APP->>STG: ⑥ COPY je_header_staging + je_line_staging
+    STG->>LED: ⑦ Post to ledger_entry_header / line<br/>(partition by month)
+    LED->>REP: ⑧ Update materialized views (trial balance, fund)
+
+```
 
 ### Data flow diagram
 ```mermaid
@@ -215,56 +511,36 @@ flowchart TD
     L1 & L2 -.-> G3
     R3 -.-> G3
 ```
-### Operational Flow
+### Template routing 
 ```mermaid
-sequenceDiagram
-    autonumber
-    %% =====================================================================
-    %% SYSTEMS & ROLES
-    %% =====================================================================
-    participant SRC as Source System<br/>(Policy / Claim / Billing DB)
-    participant APP as Backend Engine<br/>(Python + Polars)
-    participant STG as Staging DB<br/>(je_header_staging / je_line_staging)
-    participant LED as Ledger DB<br/>(ledger_entry_header / ledger_entry_line)
-    participant BAL as Balances / Snapshots
-    participant MV  as Materialized Views<br/>(Trial Balance, Fund, P&L)
-    participant AUD as Audit & Control<br/>(Batch Control, Checksum, Logs)
-    participant REP as Reporting Layer<br/>(BI / IFRS-17 Reports)
-
-    %% =====================================================================
-    %% DAILY CYCLE (OCT-2025 example)
-    %% =====================================================================
-
-    %% 1. EXTRACT & LOAD
-    SRC->>APP: ① Export transactions (txn_source)<br/>e.g., Premium Receipts, Claims
-    APP->>STG: ② COPY → staging (raw load)
-    note over STG: <b>Elapsed ≈ 25 s</b><br/>UNLOGGED, high-speed import
-
-    %% 2. EXPANSION & VALIDATION
-    APP->>APP: ③ Vectorized fund allocation<br/>& journal expansion (Polars)
-    APP->>STG: ④ Write je_header_staging + je_line_staging
-    APP->>AUD: ⑤ Register batch_control(run_id,status='PENDING')
-    APP->>APP: ⑥ Validation → DR=CR, fund/account checks
-    note over APP,STG: <b>Elapsed ≈ 5 s</b><br/>Fast vectorized verification
-
-    %% 3. POSTING WINDOW
-    APP->>LED: ⑦ COPY → ledger_entry_header / line<br/>(partitioned by month)
-    LED->>BAL: ⑧ Update monthly account_balance_snapshot
-    LED->>AUD: ⑨ Mark batch_control(status='POSTED',checksum)
-    note over LED: <b>Elapsed ≈ 60 – 70 s</b><br/>8 M lines committed
-
-    %% 4. REPORTING REFRESH
-    BAL->>MV: ⑩ Refresh materialized views<br/>(trial balance, fund, P&L)
-    MV->>REP: ⑪ Expose reports via API / dashboard
-    note over MV: <b>Elapsed ≈ 5 s</b><br/>Incremental refresh
-
-    %% 5. GOVERNANCE TRAIL
-    AUD->>REP: ⑫ Audit evidence: run_id, checksum, operator, timestamp
-    REP->>AUD: ⑬ Reconciliation logs & approvals
-    note over AUD: Full lineage: txn_source → JE → Ledger → Report
+flowchart TB
+    subgraph MATCH["Template Routing (journal_template_match)"]
+        RQ["Inputs:<br/>txn_type, product_code, channel, date, gross_amount"]
+        R1["Filter by txn_type, active period, status='ACTIVE'"]
+        R2["Filter by (product_code = input OR NULL)"]
+        R3["Filter by (channel = input OR NULL)"]
+        R4["Filter by (gross_amount BETWEEN min_amount AND max_amount) OR NULL"]
+        R5["Evaluate condition_expr (if any)"]
+        R6["ORDER BY priority ASC, specific-first"]
+        R7["LIMIT 1 → selected template"]
+    end
+    RQ --> R1 --> R2 --> R3 --> R4 --> R5 --> R6 --> R7
 
 ```
+### End-to-end operation lifecycle
+```mermaid
+flowchart TD
+    LOAD["① Load txn_source via COPY"]
+    VALIDATE["② Validate fund decomposition<br/>(gross = sum of components)"]
+    EXPAND["③ Expand to journals<br/>(via Polars templates)"]
+    STAGE["④ Stage JE header & line"]
+    POST["⑤ Post to ledger partitions"]
+    BAL["⑥ Update account_balance_snapshot"]
+    ARCHIVE["⑦ Archive failed/QA runs"]
+    PURGE["⑧ Purge old staging partitions"]
+    LOAD --> VALIDATE --> EXPAND --> STAGE --> POST --> BAL --> ARCHIVE --> PURGE
 
+```
 ### Staging live cycle 
 ```mermaid
 flowchart TD
