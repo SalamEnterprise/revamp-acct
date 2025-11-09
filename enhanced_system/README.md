@@ -1,3 +1,8 @@
+# Financial Ledger System – High-Throughput Journal Engine  
+*Scalable, auditable, and IFRS-17 ready accounting pipeline for 1M–10M transactions per batch*
+
+---
+
 # 🧭 1. System Overview
 A **hybrid architecture**:
 * **PostgreSQL** is the system of record — it holds truth: source transactions, journal templates, ledger, balances, and constraints.
@@ -19,7 +24,10 @@ flowchart TD
     style F fill:#6A5ACD,stroke:#333,color:white
 
 ```
+---
+
 # 🧩 2. Core Database Layers
+
 ## 2.1. Source Data Layer
 * Table: ```txn_source_parent``` (partitioned by txn_month)
 * Purpose: store pre-allocated transactions (premium/claim inflow/outflow).
@@ -30,6 +38,7 @@ flowchart TD
   * B-tree on ```product_code, channel```
 * Lifecycle:
   * 3 months active, older → archive → drop.
+    
 ## 2.2. Template Layer
 **Tables** in schema ```acct.```:
 | Table                    | Purpose                                                        |
@@ -52,6 +61,7 @@ flowchart TD
 
 ✅ Posted flag + timestamps enable rollback/reposting tracking.
 ✅ Idempotency via ```run_id```.
+
 ## 2.4. Ledger Layer
 | Table                      | Role                                                   |
 | -------------------------- | ------------------------------------------------------ |
@@ -67,7 +77,11 @@ flowchart TD
 * Partitioned monthly
 * Posting done via COPY FROM for both header & lines
 * Posting duration: ~60s for 8M lines
+
+---
+  
 # 🧮 3. Python (Polars) Backend Layer
+
 ## Key components:
 | Module               | Function                                               |
 | -------------------- | ------------------------------------------------------ |
@@ -87,11 +101,13 @@ flowchart TD
 | Template versioning                    | DB          | audit rule evolution            |
 | Account balance snapshots              | DB          | monthly reconciliation          |
 | Logs & metrics                         | Python + DB | performance & audit trail       |
+
 ## Core computation (vectorized)
 * Fund decomposition pre-done at source → no runtime allocation loops.
 * Amounts derived from template expressions like ```:tabarru_amount, :ujroh_amount```.
 * Polars evaluates all lines in parallel (Rust backend).
 * Validates DR=CR per ```template_control```.
+  
 ## Performance targets:
 | Step                   | Rows                 | Time |
 | ---------------------- | -------------------- | ---- |
@@ -101,8 +117,10 @@ flowchart TD
 | Post to ledger         | 8M lines             | 60s  |
 | Trial balance snapshot | aggregate            | <5s  |
 
+---
 
 # 🧰 5. Operational Utilities
+
 ## Partition rotation
 * Auto-create next month’s partitions (rotate_txn_source_partitions())
 * Add BRIN/B-tree indexes + ANALYZE
@@ -120,14 +138,21 @@ flowchart TD
 * All Python engines and SQL schemas versioned under Git
 * Template updates through controlled release (finance approval + audit log)
 
+---
+
 # 🔒 6. Compliance and Safety
+
 PostgreSQL ACID + WAL for ledger data
 * UNLOGGED staging to isolate transient load
 * Full reconciliation possible from:
   * ```txn_source → je_line_staging → ledger_entry_line```
 * Checksums and hash-based reconciliation (optional enhancement)
 * IFRS-17 ready (each fund’s journal separately posted)
+
+---
+
 # ⚙️ 7. Stack Summary
+
 | Layer               | Technology                      | Reason                                        |
 | ------------------- | ------------------------------- | --------------------------------------------- |
 | **Database**        | PostgreSQL 15+                  | ACID ledger, partitioning, PL/pgSQL utilities |
@@ -137,7 +162,10 @@ PostgreSQL ACID + WAL for ledger data
 | **Visualization**   | Metabase / ClickHouse / Grafana | reports & dashboards                          |
 | **Version Control** | Git + migration scripts         | governance & reproducibility                  |
 
+---
+
 # 🧩 8. Conceptual Flow Summary
+
 ```mermaid
 flowchart TD
   A["txn_source (monthly partition)"] -->|COPY to PostgreSQL| B["Polars Engine (expand journals)"]
@@ -148,7 +176,11 @@ flowchart TD
   B --> G["Validation logs + audit run_id"]
 
 ```
+
+---
+
 # ✅ 9. Core philosophy summary
+
 | Principle                        | Implementation                               |
 | -------------------------------- | -------------------------------------------- |
 | **Database is truth**            | PostgreSQL holds validated data & rules      |
