@@ -28,6 +28,8 @@ flowchart TD
 
 # 🧩 2. Core Database Layers
 
+[*Click for detail DDL*](./tables.md)
+
 ## 2.1. Source Data Layer
 * Table: ```txn_source_parent``` (partitioned by txn_month)
 * Purpose: store pre-allocated transactions (premium/claim inflow/outflow).
