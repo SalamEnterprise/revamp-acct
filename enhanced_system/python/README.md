@@ -1,1 +1,1 @@
-Read [run_month.md](./run_month.md) to run the system
+Read [run_month.md](./bring_up.md) to run the system
